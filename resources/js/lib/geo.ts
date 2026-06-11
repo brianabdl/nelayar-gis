@@ -25,13 +25,24 @@ export function haversineKm(a: LatLngLike, b: LatLngLike): number {
     return 2 * EARTH_RADIUS_KM * Math.asin(Math.sqrt(h));
 }
 
-// Sisa jarak (km) di sepanjang rute dari titik pada rute yang paling dekat ke
-// `current` hingga ujung akhir rute. Dipakai saat navigasi berlangsung agar
-// banner menghitung mundur jarak/ETA seiring perahu bergerak, bukan menampilkan
-// panjang rute penuh yang statis. `coords` adalah koordinat LineString [lng, lat].
-export function remainingRouteKm(coords: number[][], current: LatLngLike): number {
+export interface RouteProjection {
+    // Jarak terdekat (km) dari `current` ke garis rute — seberapa jauh menyimpang.
+    deviationKm: number;
+    // Sisa jarak (km) sepanjang rute dari titik proyeksi terdekat hingga ujung rute.
+    remainingKm: number;
+}
+
+// Proyeksikan sebuah titik ke polyline rute: cari titik terdekat di rute, lalu
+// kembalikan jarak simpang (deviationKm) dan sisa jarak hingga ujung (remainingKm).
+// Dipakai saat navigasi berlangsung untuk (a) banner yang menghitung mundur jarak
+// seiring perahu bergerak dan (b) deteksi menyimpang untuk perhitungan ulang rute.
+// `coords` adalah koordinat LineString [lng, lat].
+export function projectOntoRoute(
+    coords: number[][],
+    current: LatLngLike,
+): RouteProjection {
     if (!coords || coords.length < 2) {
-        return 0;
+        return { deviationKm: 0, remainingKm: 0 };
     }
 
     // Proyeksi equirektangular lokal (skala lng dengan cos lintang) — cukup akurat
@@ -75,18 +86,23 @@ export function remainingRouteKm(coords: number[][], current: LatLngLike): numbe
     // untuk segmen pendek), lalu jumlahkan jarak haversine hingga ujung rute.
     const [aLng, aLat] = coords[bestIdx];
     const [bLng, bLat] = coords[bestIdx + 1];
-    const proj = { lat: aLat + (bLat - aLat) * bestT, lng: aLng + (bLng - aLng) * bestT };
+    const proj = {
+        lat: aLat + (bLat - aLat) * bestT,
+        lng: aLng + (bLng - aLng) * bestT,
+    };
 
-    let remaining = haversineKm(proj, { lat: bLat, lng: bLng });
+    const deviationKm = haversineKm(proj, current);
+
+    let remainingKm = haversineKm(proj, { lat: bLat, lng: bLng });
 
     for (let i = bestIdx + 1; i < coords.length - 1; i++) {
-        remaining += haversineKm(
+        remainingKm += haversineKm(
             { lat: coords[i][1], lng: coords[i][0] },
             { lat: coords[i + 1][1], lng: coords[i + 1][0] },
         );
     }
 
-    return remaining;
+    return { deviationKm, remainingKm };
 }
 
 export interface NearbyResult {

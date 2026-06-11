@@ -6,11 +6,12 @@ import {
     useContext,
     useEffect,
     useMemo,
+    useRef,
     useState,
 } from 'react';
 import type { ReactNode } from 'react';
 
-import { remainingRouteKm } from '@/lib/geo';
+import { projectOntoRoute } from '@/lib/geo';
 import { findRouteOffline } from '@/lib/offline/route';
 import { cacheComputedRoute, readCachedRoute } from '@/lib/offline/route-cache';
 
@@ -24,6 +25,14 @@ const BOAT_SPEED_KMH = 18;
 
 // Asumsi konsumsi BBM perahu motor tempel kecil (~15 PK): ~0.4 liter per km.
 const LITERS_PER_KM = 0.4;
+
+// Ambang menyimpang: bila posisi menjauh lebih dari ini (km) dari garis rute saat
+// navigasi aktif, rute dihitung ulang dari posisi sekarang.
+const OFF_COURSE_KM = 2;
+
+// Jeda minimal antar perhitungan ulang agar GPS yang bergoyang tidak membanjiri
+// server dengan permintaan rute.
+const REROUTE_COOLDOWN_MS = 20_000;
 
 export type FuelType = 'pertalite' | 'solar';
 
@@ -100,6 +109,103 @@ function routeLineCoords(feature: Feature | null): number[][] {
     return [];
 }
 
+interface ResolvedRoute {
+    routeGeoJson: Feature;
+    distanceKm: number | null;
+    fuelPrices: FuelPrices | null;
+    approximate: boolean;
+}
+
+// Hitung rute laut origin→destination memakai sumber terbaik yang tersedia:
+// tanpa sinyal → cache rute server lalu perute graf laut klien; online → endpoint
+// server /api/map/route dengan fallback ke perute offline. Melempar hanya bila
+// semua jalur gagal. Murni (tak menyentuh state React) sehingga bisa dipakai baik
+// untuk merencanakan rute baru maupun menghitung ulang saat perahu menyimpang.
+async function resolveRoute(
+    origin: LatLng,
+    destination: LatLng,
+): Promise<ResolvedRoute> {
+    // Perute offline (graf laut sisi klien). Tidak melempar untuk titik jauh dari
+    // jaringan; mengembalikan garis lurus dengan flag `approximate`.
+    const planOffline = async (): Promise<ResolvedRoute> => {
+        const r = await findRouteOffline(
+            origin.lat,
+            origin.lng,
+            destination.lat,
+            destination.lng,
+        );
+
+        return {
+            routeGeoJson: r.route as Feature,
+            distanceKm: r.distance,
+            fuelPrices: null, // harga BBM butuh server — tak tersedia offline
+            approximate: r.approximate ?? false,
+        };
+    };
+
+    // Tanpa sinyal: pakai rute server yang sudah di-cache (akurat); kalau tak ada,
+    // baru perute graf klien.
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        const cached = await readCachedRoute(
+            origin.lat,
+            origin.lng,
+            destination.lat,
+            destination.lng,
+        );
+
+        if (cached) {
+            return {
+                routeGeoJson: cached.route,
+                distanceKm: cached.distance,
+                fuelPrices: null,
+                approximate: false,
+            };
+        }
+
+        return planOffline();
+    }
+
+    try {
+        const res = await axios.get('/api/map/route', {
+            params: {
+                start_lat: origin.lat,
+                start_lng: origin.lng,
+                end_lat: destination.lat,
+                end_lng: destination.lng,
+            },
+        });
+
+        const data = res.data;
+
+        if (!data?.route) {
+            throw new Error(data?.error || 'Rute tidak ditemukan.');
+        }
+
+        const distanceKm =
+            typeof data.distance === 'number' ? data.distance : null;
+
+        // Simpan rute server ini agar tersedia saat offline nanti.
+        void cacheComputedRoute(
+            origin.lat,
+            origin.lng,
+            destination.lat,
+            destination.lng,
+            data.route as Feature,
+            distanceKm,
+        );
+
+        return {
+            routeGeoJson: data.route as Feature,
+            distanceKm,
+            fuelPrices: (data.fuel as FuelPrices) ?? null,
+            approximate: false,
+        };
+    } catch {
+        // Server gagal walau online — coba perute offline sebelum menyerah.
+        return planOffline();
+    }
+}
+
 const initialState: NavState = {
     status: 'idle',
     origin: null,
@@ -120,6 +226,11 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     const [fuelType, setFuelType] = useState<FuelType>('solar');
     const [following, setFollowing] = useState<boolean>(false);
 
+    // Penjaga perhitungan ulang rute saat menyimpang: `reroutingRef` mencegah
+    // permintaan tumpang tindih, `lastRerouteRef` menegakkan jeda antar-hitung.
+    const reroutingRef = useRef<boolean>(false);
+    const lastRerouteRef = useRef<number>(0);
+
     const planRoute = useCallback(
         async (destination: LatLng) => {
             if (!userPosition) {
@@ -132,124 +243,39 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
                 return;
             }
 
+            const origin = userPosition;
+
             setState((s) => ({
                 ...s,
                 status: 'planning',
-                origin: userPosition,
+                origin,
                 destination,
                 error: null,
             }));
 
-            // Perute offline (graf laut di sisi klien) — dipakai saat tanpa sinyal
-            // atau bila server gagal. Tidak melempar; bila titik jauh dari jaringan,
-            // mengembalikan garis lurus dengan flag `approximate`.
-            const planOffline = async () => {
-                const r = await findRouteOffline(
-                    userPosition.lat,
-                    userPosition.lng,
-                    destination.lat,
-                    destination.lng,
-                );
-                const distanceKm = r.distance;
-
-                setState({
-                    status: 'planned',
-                    origin: userPosition,
-                    destination,
-                    routeGeoJson: r.route as Feature,
-                    distanceKm,
-                    etaHours: distanceKm / BOAT_SPEED_KMH,
-                    fuelPrices: null, // harga BBM butuh server — tak tersedia offline
-                    error: null,
-                    approximate: r.approximate ?? false,
-                });
-            };
-
-            // Tanpa sinyal: pakai rute server yang sudah di-cache saat zona diklik
-            // online (rute laut akurat); kalau tak ada, baru perute graf klien.
-            if (typeof navigator !== 'undefined' && !navigator.onLine) {
-                const cached = await readCachedRoute(
-                    userPosition.lat,
-                    userPosition.lng,
-                    destination.lat,
-                    destination.lng,
-                );
-
-                if (cached) {
-                    setState({
-                        status: 'planned',
-                        origin: userPosition,
-                        destination,
-                        routeGeoJson: cached.route,
-                        distanceKm: cached.distance,
-                        etaHours: cached.distance / BOAT_SPEED_KMH,
-                        fuelPrices: null,
-                        error: null,
-                        approximate: false,
-                    });
-
-                    return;
-                }
-
-                await planOffline();
-
-                return;
-            }
-
             try {
-                const res = await axios.get('/api/map/route', {
-                    params: {
-                        start_lat: userPosition.lat,
-                        start_lng: userPosition.lng,
-                        end_lat: destination.lat,
-                        end_lng: destination.lng,
-                    },
-                });
-
-                const data = res.data;
-
-                if (!data?.route) {
-                    throw new Error(data?.error || 'Rute tidak ditemukan.');
-                }
-
-                const distanceKm =
-                    typeof data.distance === 'number' ? data.distance : null;
-                const etaHours = distanceKm
-                    ? distanceKm / BOAT_SPEED_KMH
-                    : null;
+                const r = await resolveRoute(origin, destination);
 
                 setState({
                     status: 'planned',
-                    origin: userPosition,
+                    origin,
                     destination,
-                    routeGeoJson: data.route as Feature,
-                    distanceKm,
-                    etaHours,
-                    fuelPrices: (data.fuel as FuelPrices) ?? null,
+                    routeGeoJson: r.routeGeoJson,
+                    distanceKm: r.distanceKm,
+                    etaHours:
+                        r.distanceKm != null
+                            ? r.distanceKm / BOAT_SPEED_KMH
+                            : null,
+                    fuelPrices: r.fuelPrices,
                     error: null,
-                    approximate: false,
+                    approximate: r.approximate,
                 });
-
-                // Simpan rute server ini agar tersedia saat offline nanti.
-                void cacheComputedRoute(
-                    userPosition.lat,
-                    userPosition.lng,
-                    destination.lat,
-                    destination.lng,
-                    data.route as Feature,
-                    distanceKm,
-                );
             } catch {
-                // Server gagal walau online — coba perute offline sebelum menyerah.
-                try {
-                    await planOffline();
-                } catch {
-                    setState((s) => ({
-                        ...s,
-                        status: 'error',
-                        error: 'Gagal menghitung rute.',
-                    }));
-                }
+                setState((s) => ({
+                    ...s,
+                    status: 'error',
+                    error: 'Gagal menghitung rute.',
+                }));
             }
         },
         [userPosition],
@@ -314,13 +340,74 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
             return state.distanceKm;
         }
 
-        return remainingRouteKm(coords, userPosition);
+        return projectOntoRoute(coords, userPosition).remainingKm;
     }, [state.status, state.routeGeoJson, state.distanceKm, userPosition]);
 
     const remainingEtaHours = useMemo<number | null>(
         () => (remainingKm != null ? remainingKm / BOAT_SPEED_KMH : null),
         [remainingKm],
     );
+
+    // Perhitungan ulang otomatis saat menyimpang: selama navigasi aktif, ukur jarak
+    // posisi terkini ke garis rute; bila melewati ambang (dengan jeda antar-hitung &
+    // penjaga in-flight agar tak membanjiri server), hitung ulang rute dari posisi
+    // sekarang ke tujuan yang sama tanpa keluar dari status 'active'. Bila gagal,
+    // rute lama dipertahankan dan dicoba lagi setelah jeda berikutnya. Tidak ada
+    // setState sinkron di sini — pembaruan hanya terjadi di callback async.
+    useEffect(() => {
+        if (state.status !== 'active' || !userPosition || !state.destination) {
+            return;
+        }
+
+        const coords = routeLineCoords(state.routeGeoJson);
+
+        if (coords.length < 2) {
+            return;
+        }
+
+        const { deviationKm } = projectOntoRoute(coords, userPosition);
+
+        if (deviationKm < OFF_COURSE_KM || reroutingRef.current) {
+            return;
+        }
+
+        if (Date.now() - lastRerouteRef.current < REROUTE_COOLDOWN_MS) {
+            return;
+        }
+
+        reroutingRef.current = true;
+        lastRerouteRef.current = Date.now();
+
+        const origin = userPosition;
+        const destination = state.destination;
+
+        resolveRoute(origin, destination)
+            .then((r) => {
+                setState((s) =>
+                    // Pastikan masih bernavigasi ke tujuan yang sama saat hasil tiba.
+                    s.status === 'active' && s.destination === destination
+                        ? {
+                              ...s,
+                              origin,
+                              routeGeoJson: r.routeGeoJson,
+                              distanceKm: r.distanceKm,
+                              etaHours:
+                                  r.distanceKm != null
+                                      ? r.distanceKm / BOAT_SPEED_KMH
+                                      : null,
+                              fuelPrices: r.fuelPrices ?? s.fuelPrices,
+                              approximate: r.approximate,
+                          }
+                        : s,
+                );
+            })
+            .catch(() => {
+                // Pertahankan rute lama; coba lagi setelah cooldown berikutnya.
+            })
+            .finally(() => {
+                reroutingRef.current = false;
+            });
+    }, [state.status, state.destination, state.routeGeoJson, userPosition]);
 
     // Estimasi biaya BBM pulang-pergi: jarak ×2 × konsumsi × harga/liter.
     const fuelEstimate = useMemo<FuelEstimate | null>(() => {
