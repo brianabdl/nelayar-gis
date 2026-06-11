@@ -21,7 +21,7 @@ const createUserIcon = () => {
 export default function LocateControl() {
     const map = useMap();
     const nav = useNavigation();
-    const { userPosition, setUserPosition } = nav;
+    const { userPosition, setUserPosition, following, setFollowing } = nav;
 
     const [isLocating, setIsLocating] = useState<boolean>(false);
     const [error, setError] = useState<string | null>(null);
@@ -30,6 +30,28 @@ export default function LocateControl() {
     useEffect(() => {
         if (map.zoomControl) map.removeControl(map.zoomControl);
     }, [map]);
+
+    // Geser peta agar marker tetap di tengah setiap kali posisi GPS diperbarui,
+    // selama navigasi aktif dan mode ikut menyala. Zoom tidak diubah.
+    useEffect(() => {
+        if (nav.status === 'active' && following && userPosition) {
+            map.panTo([userPosition.lat, userPosition.lng], {
+                animate: true,
+                duration: 0.5,
+            });
+        }
+    }, [nav.status, following, userPosition, map]);
+
+    // Geseran manual oleh pengguna menonaktifkan mode ikut (panTo programatik tidak
+    // memicu 'dragstart', jadi ini hanya bereaksi pada interaksi nyata).
+    useEffect(() => {
+        const stopFollowing = () => setFollowing(false);
+        map.on('dragstart', stopFollowing);
+
+        return () => {
+            map.off('dragstart', stopFollowing);
+        };
+    }, [map, setFollowing]);
 
     const locate = ({ fly = true, silent = false } = {}) => {
         if (!('geolocation' in navigator)) {
@@ -119,6 +141,29 @@ export default function LocateControl() {
                     </div>
                 )}
             </div>
+
+            {/* Tombol pusatkan: muncul hanya saat navigasi aktif & pengguna sudah
+                menggeser peta (mode ikut mati). Menekannya memusatkan ulang ke
+                perahu dan menyalakan kembali mode ikut. */}
+            {isActive && !following && (
+                <div className="pointer-events-auto absolute right-4 bottom-10 z-[950]">
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setFollowing(true);
+                            if (userPosition) {
+                                map.panTo([userPosition.lat, userPosition.lng], {
+                                    animate: true,
+                                });
+                            }
+                        }}
+                        title="Pusatkan ke lokasi saya"
+                        className="group glass-panel flex h-10 w-10 items-center justify-center rounded-xl text-blue-600 shadow-md transition-all hover:bg-white/60 active:scale-95 border border-white/40 backdrop-blur-md"
+                    >
+                        <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3" /><circle cx="12" cy="12" r="8" /></svg>
+                    </button>
+                </div>
+            )}
 
             {userPosition && (
                 <Marker

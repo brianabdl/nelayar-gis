@@ -10,6 +10,7 @@ import {
 } from 'react';
 import type { ReactNode } from 'react';
 
+import { remainingRouteKm } from '@/lib/geo';
 import { findRouteOffline } from '@/lib/offline/route';
 import { cacheComputedRoute, readCachedRoute } from '@/lib/offline/route-cache';
 
@@ -68,6 +69,35 @@ interface NavContextValue extends NavState {
     fuelType: FuelType;
     setFuelType: (t: FuelType) => void;
     fuelEstimate: FuelEstimate | null;
+    // Sisa jarak/ETA yang menghitung mundur saat status 'active' (mengikuti posisi
+    // GPS langsung); di luar navigasi aktif sama dengan jarak/ETA rute penuh.
+    remainingKm: number | null;
+    remainingEtaHours: number | null;
+    // Mode "ikuti": peta terpusat otomatis ke perahu selama navigasi aktif.
+    // Dinyalakan saat keberangkatan dikonfirmasi, dimatikan saat pengguna menggeser
+    // peta manual, dan dinyalakan lagi lewat tombol pusatkan di peta.
+    following: boolean;
+    setFollowing: (v: boolean) => void;
+}
+
+// Ekstrak koordinat garis [lng, lat] dari Feature rute (LineString atau
+// MultiLineString) untuk perhitungan sisa jarak.
+function routeLineCoords(feature: Feature | null): number[][] {
+    const geom = feature?.geometry;
+
+    if (!geom) {
+        return [];
+    }
+
+    if (geom.type === 'LineString') {
+        return geom.coordinates;
+    }
+
+    if (geom.type === 'MultiLineString') {
+        return geom.coordinates.flat();
+    }
+
+    return [];
 }
 
 const initialState: NavState = {
@@ -88,6 +118,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     const [userPosition, setUserPosition] = useState<LatLng | null>(null);
     const [state, setState] = useState<NavState>(initialState);
     const [fuelType, setFuelType] = useState<FuelType>('solar');
+    const [following, setFollowing] = useState<boolean>(false);
 
     const planRoute = useCallback(
         async (destination: LatLng) => {
@@ -261,11 +292,35 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         setState((s) =>
             s.status === 'planned' ? { ...s, status: 'active' } : s,
         );
+        // Mulai dengan peta mengikuti perahu begitu perjalanan dimulai.
+        setFollowing(true);
     }, []);
 
     const cancelNavigation = useCallback(() => {
         setState(initialState);
+        setFollowing(false);
     }, []);
+
+    // Sisa jarak hingga tujuan: saat navigasi aktif, proyeksikan posisi GPS
+    // terkini ke rute dan ukur sisanya; di luar itu pakai jarak rute penuh.
+    const remainingKm = useMemo<number | null>(() => {
+        if (state.status !== 'active' || !userPosition) {
+            return state.distanceKm;
+        }
+
+        const coords = routeLineCoords(state.routeGeoJson);
+
+        if (coords.length < 2) {
+            return state.distanceKm;
+        }
+
+        return remainingRouteKm(coords, userPosition);
+    }, [state.status, state.routeGeoJson, state.distanceKm, userPosition]);
+
+    const remainingEtaHours = useMemo<number | null>(
+        () => (remainingKm != null ? remainingKm / BOAT_SPEED_KMH : null),
+        [remainingKm],
+    );
 
     // Estimasi biaya BBM pulang-pergi: jarak ×2 × konsumsi × harga/liter.
     const fuelEstimate = useMemo<FuelEstimate | null>(() => {
@@ -298,6 +353,10 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
                 fuelType,
                 setFuelType,
                 fuelEstimate,
+                remainingKm,
+                remainingEtaHours,
+                following,
+                setFollowing,
             }}
         >
             {children}
