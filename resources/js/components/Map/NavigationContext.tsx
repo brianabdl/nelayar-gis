@@ -4,6 +4,7 @@ import {
     createContext,
     useCallback,
     useContext,
+    useEffect,
     useMemo,
     useState,
 } from 'react';
@@ -222,6 +223,38 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         },
         [userPosition],
     );
+
+    // Pelacakan GPS langsung selama navigasi berlangsung: selama status 'active'
+    // (pengguna sudah menekan "Mulai"), berlangganan watchPosition agar posisi
+    // pengguna — dan marker "Lokasi Anda" — bergerak mengikuti perahu. Berhenti
+    // (clearWatch) saat navigasi diakhiri/komponen dilepas supaya GPS & baterai
+    // tidak terpakai sia-sia di luar perjalanan.
+    useEffect(() => {
+        if (state.status !== 'active') {
+            return;
+        }
+
+        if (typeof navigator === 'undefined' || !('geolocation' in navigator)) {
+            return;
+        }
+
+        const watchId = navigator.geolocation.watchPosition(
+            (pos) => {
+                setUserPosition({
+                    lat: pos.coords.latitude,
+                    lng: pos.coords.longitude,
+                });
+            },
+            (err) => {
+                // Jangan akhiri navigasi karena satu fix gagal — fix berikutnya
+                // bisa berhasil; cukup catat. Posisi terakhir tetap dipakai.
+                console.warn('Pelacakan GPS terganggu.', err.message);
+            },
+            { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 },
+        );
+
+        return () => navigator.geolocation.clearWatch(watchId);
+    }, [state.status]);
 
     // Konfirmasi keberangkatan: perjalanan menjadi "berlangsung" (mode PWA on-going).
     const confirmDeparture = useCallback(() => {

@@ -22,8 +22,7 @@ export default function LocateControl() {
     const map = useMap();
     const nav = useNavigation();
     const { userPosition, setUserPosition } = nav;
-    
-    const [position, setPosition] = useState<[number, number] | null>(null);
+
     const [isLocating, setIsLocating] = useState<boolean>(false);
     const [error, setError] = useState<string | null>(null);
     const autoRequested = useRef<boolean>(false);
@@ -44,7 +43,6 @@ export default function LocateControl() {
         navigator.geolocation.getCurrentPosition(
             (pos) => {
                 const coords: [number, number] = [pos.coords.latitude, pos.coords.longitude];
-                setPosition(coords);
                 setUserPosition({ lat: coords[0], lng: coords[1] });
                 setIsLocating(false);
                 if (fly) map.flyTo(coords, 14, { duration: 1.5 });
@@ -61,7 +59,6 @@ export default function LocateControl() {
                 if (silent) return;
 
                 const fallbackCoords: [number, number] = [-7.2000, 112.7500];
-                setPosition(fallbackCoords);
                 setUserPosition({ lat: fallbackCoords[0], lng: fallbackCoords[1] });
 
                 setError(err.code === err.PERMISSION_DENIED ? 'Izin ditolak.' : 'GPS lemah. Memakai fallback.');
@@ -123,8 +120,11 @@ export default function LocateControl() {
                 )}
             </div>
 
-            {position && (
-                <Marker position={position} icon={createUserIcon()}>
+            {userPosition && (
+                <Marker
+                    position={[userPosition.lat, userPosition.lng]}
+                    icon={createUserIcon()}
+                >
                     <Popup>Lokasi Anda saat ini</Popup>
                 </Marker>
             )}
