@@ -108,9 +108,12 @@ COPY --from=assets /app/public ./public
 # `microservice/.venv/bin/python` correctly (relative to project root).
 # Use uv so the image follows microservice/pyproject.toml + uv.lock instead
 # of keeping a handwritten pip install list in the Dockerfile.
-RUN python3 -m pip install --no-cache-dir uv \
+RUN python3 -m venv /tmp/uv-bootstrap \
+    && /tmp/uv-bootstrap/bin/pip install --no-cache-dir --upgrade pip uv \
     && cd microservice \
-    && uv sync --frozen --no-dev --no-install-project
+    && /tmp/uv-bootstrap/bin/uv python install 3.12 \
+    && /tmp/uv-bootstrap/bin/uv sync --frozen --no-dev --no-install-project --python 3.12 \
+    && rm -rf /tmp/uv-bootstrap
 
 # --- Ensure Laravel's writable dirs exist, then fix permissions ---
 RUN mkdir -p \
