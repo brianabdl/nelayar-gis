@@ -43,9 +43,11 @@ Real-time tracking of marine commodity price fluctuations, which can be filtered
 
 **CMEMS SST & CHL-A**
 https://data.marine.copernicus.eu/product/GLOBAL_ANALYSISFORECAST_PHY_001_024/description
+>
 https://data.marine.copernicus.eu/product/GLOBAL_ANALYSISFORECAST_BGC_001_028/description
 
 **Fish Prices**
+https://mi.kkp.go.id
 
 ## 🛠️ Built With
 
