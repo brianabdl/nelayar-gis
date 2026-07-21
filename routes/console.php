@@ -1,16 +1,14 @@
 <?php
 
-use Illuminate\Foundation\Inspiring;
-use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schedule;
 
-Artisan::command('inspire', function () {
-    $this->comment(Inspiring::quote());
-})->purpose('Display an inspiring quote');
+Schedule::command('ocean:sync-forecast')
+    ->dailyAt(config('schedule.zppi.time'))
+    ->when(config('schedule.zppi.enabled'));
 
-// --- JADWAL OTOMATIS NELAYAR ---
-// 1. Sinkronisasi ZPPI 10 hari.
-Schedule::command('ocean:sync-forecast')->dailyAt('02:00');
-
-// 2. Mengambil data harga pasar ikan mingguan dari situs KKP
-Schedule::command('nelayar:scrape-kkp')->weekly();
+Schedule::command('nelayar:scrape-kkp')
+    ->weeklyOn(
+        config('schedule.kkp.day'),
+        config('schedule.kkp.time')
+    )
+    ->when(config('schedule.kkp.enabled'));
