@@ -108,12 +108,19 @@ COPY --from=assets /app/public ./public
 # `microservice/.venv/bin/python` correctly (relative to project root).
 # Use uv so the image follows microservice/pyproject.toml + uv.lock instead
 # of keeping a handwritten pip install list in the Dockerfile.
-RUN python3 -m venv /tmp/uv-bootstrap \
-    && /tmp/uv-bootstrap/bin/pip install --no-cache-dir --upgrade pip uv \
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# uv-managed CPython defaults to /root/.local/share/uv/python, which is 0700
+# and unreadable by www-data at runtime. Point it somewhere world-traversable
+# instead, so .venv/bin/python (kept as a symlink) can still resolve its
+# stdlib via CPython's relative landmark-file lookup (../lib/python3.12).
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
+
+RUN mkdir -p /opt/uv/python \
     && cd microservice \
-    && /tmp/uv-bootstrap/bin/uv python install 3.12 \
-    && /tmp/uv-bootstrap/bin/uv sync --frozen --no-dev --no-install-project --python 3.12 \
-    && rm -rf /tmp/uv-bootstrap
+    && uv python install 3.12 \
+    && uv sync --frozen --no-dev --no-install-project --python 3.12 \
+    && chmod -R a+rX /opt/uv/python
 
 # --- Ensure Laravel's writable dirs exist, then fix permissions ---
 RUN mkdir -p \
